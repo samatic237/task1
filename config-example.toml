@@ -1,0 +1,10 @@
+[telegram]
+# Это значение можно будет взять у Bot Father'а.
+api_key = ""
+[gigachat]
+# И client id, и client secret можно взять с проекта на https://developers.sber.ru/studio
+# Обратите внимание, что client secret отображается всего один раз!
+client_id = ""
+client_secret = ""
+
+# Перед запуском бота, переименуйте данный файл в "config.toml".
