@@ -87,7 +87,7 @@ class Client:
         Помимо прямой работы с API, менеджит сессии пользователей.
         Класс Client должен быть один на всю программу.
         """
-        self.connection = sqlite3.connect(config.path)
+        self.connection = sqlite3.connect(config.path, check_same_thread=False)
         self.connection_lock = threading.Lock()
         self.initial_message = initial_message
         self.raw_client = raw_client
@@ -113,7 +113,8 @@ class Client:
                     return Session(session_uuid, [self.initial_message])
                 session_uuid = result[0]
                 session = Session(session_uuid, list(map(lambda tup: Message(tup[1], tup[0]),
-                                                         cur.execute("SELECT role, content FROM messages WHERE user_id = ? ORDER BY message_id"))))
+                                                         cur.execute("SELECT role, content FROM messages WHERE user_id = ? ORDER BY message_id",
+                                                                     (user_id,)))))
                 cur.close()
                 return session
 

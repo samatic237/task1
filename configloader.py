@@ -31,7 +31,7 @@ def load_config(path: str) -> Config:
     with open(path, "rb") as cfg:
         cfg_raw = tomllib.load(cfg)        
     cfg = cattrs.structure(cfg_raw, Config)
-    parent = cfg.parent
+    parent = cfg.database.path.parent
     if not parent.exists():
         parent.mkdir(parents=True)
     return cfg
