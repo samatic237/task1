@@ -3,3 +3,4 @@ __pycache__/
 config.toml
 pyrightconfig.json
 bot.db
+*.db
