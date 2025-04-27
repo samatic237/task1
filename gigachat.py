@@ -40,7 +40,7 @@ class RawClient:
     def __init__(self, config: GigachatConfig) -> None:
         """Класс RawClient должен быть один на всю программу."""
         self.session = requests.Session()
-        self.session.verify = "./bundle"
+        self.session.verify = False
         self.config = config
         self.token: Token | None = None
         self.token_lock = threading.Lock()

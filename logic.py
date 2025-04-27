@@ -2,7 +2,7 @@ import telebot
 from configloader import load_config
 import gigachat
 
-PROMPT = gigachat.Message("Ты - добрый ассистент.", "system")
+PROMPT = gigachat.Message("Ты - менеджер по карьере.", "system")
 
 cfg = load_config("config.toml")
 
