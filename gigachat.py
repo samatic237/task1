@@ -99,12 +99,19 @@ class Trans:
                     for m in self.cur.execute("SELECT content, role FROM messages WHERE user_id = ? ORDER BY message_id", (user_id,))]
         return Session(session_uuid, messages)
 
+    def delete_session(self, user_id: int) -> None:
+        self.cur.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        self.cur.execute("DELETE FROM messages WHERE user_id = ?", (user_id,))
+    
     def create_session(self, user_id: int, initial_message: Message) -> Session:
         session_uuid = str(uuid.uuid4())
         self.cur.execute("INSERT INTO sessions (user_id, session_uuid) VALUES (?, ?)", (user_id, session_uuid))
         self.cur.execute("INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)", (user_id, initial_message.role, initial_message.content))
         return Session(session_uuid, [initial_message])
 
+    def reset_session(self, user_id: int, initial_message: Message) -> None:
+        self.delete_session(user_id)
+        self.create_session(user_id, initial_message)
     
     def get_or_create_session(self, user_id: int, initial_message: Message) -> Session:
         return self.get_session(user_id) or self.create_session(user_id, initial_message)
@@ -135,7 +142,7 @@ class Database:
                 cur.close()
     
 class Client:    
-    def __init__(self, config: DatabaseConfig, raw_client: RawClient, initial_message: Message) -> None:
+    def __init__(self, raw_client: RawClient, database: Database, initial_message: Message) -> None:
         """
         Помимо прямой работы с API, менеджит сессии пользователей.
         Класс Client должен быть один на всю программу.
@@ -143,14 +150,12 @@ class Client:
 
         self.initial_message = initial_message
         self.raw_client = raw_client
-        self.database = Database(config)
-
+        self.database = database
         
     def chat(self, message: Message, user_id: int) -> Message:
         with self.database.begin() as trans:
             session = trans.get_or_create_session(user_id, self.initial_message)
 
-        print("Session:", session)
         additional_headers = {
             "X-Session-Id": session.id
         }
