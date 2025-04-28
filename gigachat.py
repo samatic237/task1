@@ -5,8 +5,10 @@ import uuid
 import threading
 import requests
 from requests import auth
+from collections.abc import Iterator
 import cattrs
 import time
+from contextlib import contextmanager
 
 MODEL = "GigaChat"
 
@@ -36,18 +38,20 @@ class Session:
     messages: list[Message]
 
 
+LIMIT = 10
+
 class RawClient:    
     def __init__(self, config: GigachatConfig) -> None:
         """Класс RawClient должен быть один на всю программу."""
         self.session = requests.Session()
-        self.session.verify = False
         self.config = config
         self.token: Token | None = None
         self.token_lock = threading.Lock()
+        self.conn_semaphore = threading.BoundedSemaphore(LIMIT)
         
     def new_token(self) -> Token:
         rq_uid = str(uuid.uuid4())
-        response = self.session.post(AUTH_URL, headers={"RqUID": rq_uid}, data={"scope": SCOPE},
+        response = self.session.post(AUTH_URL, headers={"RqUID": rq_uid}, data={"scope": SCOPE}, verify=False,
                                      auth=auth.HTTPBasicAuth(self.config.client_id, self.config.client_secret))
         response.raise_for_status()
         token = cattrs.structure(response.json(), Token)
@@ -66,13 +70,14 @@ class RawClient:
             "Authorization": f"Bearer {self.token.access_token}",
         }
         headers.update(additional_headers)
-                    
-        response = self.session.post(BASE_API_URL + "/chat/completions", json=payload,
-                                     headers=headers)
-        
-        
+
+        with self.conn_semaphore:
+            response = self.session.post(BASE_API_URL + "/chat/completions", json=payload,
+                                         headers=headers, verify=False)
+            
+        response.raise_for_status()                
         data = response.json()
-        response.raise_for_status()        
+
         for raw_msg in data["choices"]:
             if raw_msg["finish_reason"] == "error":
                 continue
@@ -81,59 +86,80 @@ class RawClient:
         raise Exception("Нет ответа без ошибки >:")
 
 
+class Trans:
+    def __init__(self, cur: sqlite3.Cursor) -> None:
+        self.cur = cur
+        
+    def get_session(self, user_id: int) -> Session | None:
+        result = self.cur.execute("SELECT session_uuid FROM sessions WHERE user_id = ?", (user_id,)).fetchone()
+        if result is None:
+            return None
+        session_uuid = result[0]
+        messages = [Message(content=m[0], role=m[1])
+                    for m in self.cur.execute("SELECT content, role FROM messages WHERE user_id = ? ORDER BY message_id", (user_id,))]
+        return Session(session_uuid, messages)
+
+    def create_session(self, user_id: int, initial_message: Message) -> Session:
+        session_uuid = str(uuid.uuid4())
+        self.cur.execute("INSERT INTO sessions (user_id, session_uuid) VALUES (?, ?)", (user_id, session_uuid))
+        self.cur.execute("INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)", (user_id, initial_message.role, initial_message.content))
+        return Session(session_uuid, [initial_message])
+
+    
+    def get_or_create_session(self, user_id: int, initial_message: Message) -> Session:
+        return self.get_session(user_id) or self.create_session(user_id, initial_message)
+
+    def add_messages(self, messages: list[Message], user_id: int) -> None:
+        self.cur.executemany("INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)",
+                             ((user_id, message.role, message.content) for message in messages))            
+
+class Database:
+    def __init__(self, config: DatabaseConfig) -> None:
+        self.connection = sqlite3.connect(config.path, check_same_thread=False)
+        self.connection_lock = threading.Lock()
+        self.init()
+        
+    # NOTE: Не thread-safe
+    def init(self) -> None:
+        self.connection.executescript("""
+        CREATE TABLE IF NOT EXISTS sessions (user_id INTEGER PRIMARY KEY NOT NULL, session_uuid TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS messages (message_id INTEGER PRIMARY KEY NOT NULL, user_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL);
+        """)
+
+    @contextmanager
+    def begin(self) -> Iterator[Trans]:
+        with self.connection_lock:
+            with self.connection:
+                cur = self.connection.cursor()
+                yield Trans(cur)
+                cur.close()
+    
 class Client:    
     def __init__(self, config: DatabaseConfig, raw_client: RawClient, initial_message: Message) -> None:
         """
         Помимо прямой работы с API, менеджит сессии пользователей.
         Класс Client должен быть один на всю программу.
         """
-        self.connection = sqlite3.connect(config.path, check_same_thread=False)
-        self.connection_lock = threading.Lock()
+
         self.initial_message = initial_message
         self.raw_client = raw_client
-        self.initialize_database()
-        
-    def initialize_database(self):
-        self.connection.executescript("""
-        CREATE TABLE IF NOT EXISTS sessions (user_id INTEGER PRIMARY KEY NOT NULL, session_uuid TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS messages (message_id INTEGER PRIMARY KEY NOT NULL, user_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL);
-        """) 
+        self.database = Database(config)
 
-    def get_or_create_session(self, user_id: int) -> Session:
-        session_uuid: str
-        with self.connection_lock:
-            with self.connection:
-                cur = self.connection.cursor()
-                result = cur.execute("SELECT session_uuid FROM sessions WHERE user_id = ?", (user_id,)).fetchone()
-                if result is None:
-                    session_uuid = str(uuid.uuid4())
-                    cur.execute("INSERT INTO sessions (user_id, session_uuid) VALUES (?, ?)", (user_id, session_uuid))
-                    cur.execute("INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)", (user_id, self.initial_message.role, self.initial_message.content))
-                    cur.close()                    
-                    return Session(session_uuid, [self.initial_message])
-                session_uuid = result[0]
-                session = Session(session_uuid, list(map(lambda tup: Message(tup[1], tup[0]),
-                                                         cur.execute("SELECT role, content FROM messages WHERE user_id = ? ORDER BY message_id",
-                                                                     (user_id,)))))
-                cur.close()
-                return session
-
-    def add_messages(self, messages: list[Message], user_id: int) -> None:
-        with self.connection_lock:
-            with self.connection:
-                self.connection.executemany("INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)",
-                                            map(lambda m: (user_id, m.role, m.content), messages))
         
     def chat(self, message: Message, user_id: int) -> Message:
-        session = self.get_or_create_session(user_id)
-            
+        with self.database.begin() as trans:
+            session = trans.get_or_create_session(user_id, self.initial_message)
+
+        print("Session:", session)
         additional_headers = {
             "X-Session-Id": session.id
         }
 
         session.messages.append(message)
-        new_message = self.raw_client.chat(session.messages, additional_headers)        
-        self.add_messages([message, new_message], user_id)
+        new_message = self.raw_client.chat(session.messages, additional_headers)
+        
+        with self.database.begin() as trans:
+            trans.add_messages([message, new_message], user_id)
         
         return new_message
         
